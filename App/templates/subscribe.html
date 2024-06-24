@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <style>
+        h1 {
+            font-size: 32px; /* Increased size of header */
+            color: #333;
+        }
+        .plan ul li::before {
+            content: '✔';
+            margin-right: 10px;
+            color: white;
+            background-color: black; /* Black circle */
+            border-radius: 50%;
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            text-align: center;
+            line-height: 20px;
+            margin-top: 5%;
+        }
+        .plan ul {
+            list-style: none;
+            padding: 0;
+            text-align: left;
+            font-size: 18px; /* Increased font size of li items */
+            color: #555;
+        }
+        #subscribe-button-container {
+            position: fixed;
+            bottom: 10px;
+            width: 100%;
+            text-align: center;
+            background: #fff;
+            padding: 10px 0;
+        }
+        #subscribe-button-container span {
+            display: block;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #555;
+        }
+        #subscribe-button {
+            width: 80%;
+            height: 50px;
+            background-color: black;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.3s;
+        }
+        #subscribe-button:hover {
+            background-color: #333;
+            transform: scale(1.05);
+        }
+        @media (min-width: 600px) {
+            #subscribe-button-container {
+                position: static;
+                width: auto;
+                background: none;
+                padding: 0;
+            }
+            #subscribe-button-container span {
+                margin-bottom: 0;
+            }
+            #subscribe-button {
+                width: auto;
+                height: auto;
+                border-radius: 4px;
+            }
+        }
+    </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subscribe to Pro Version</title>
+    <script src="https://js.stripe.com/v3/"></script>
+</head>
+<body>
+    <h1>Scai Plus</h1>
+    <div class="plan">
+        <ul>
+            <li>Voice Command</li>
+            <li>10 Queries per Day</li>
+            <li>Audio Form</li>
+            <li>7 Days History Backup</li>
+            <li>Reference Feature</li>
+        </ul>
+    </div>
+
+    <div id="subscribe-button-container">
+        <span>Auto-renews for $10/month until canceled</span>
+        <button id="subscribe-button">Subscribe</button>
+    </div>
+
+    <script type="text/javascript">
+        document.getElementById('subscribe-button').addEventListener('click', function () {
+            fetch('/subscribe', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert(data.error);
+                } else {
+                    var stripe = Stripe('pk_live_51PDNsQGthr7AaSvULnZNACBai9axnSrVJ0CqAbhbwr0F7Xg8EYrmCevgQYLDTGymKowgatM29bzeofxK8I4IZAdg00K7TIkTDk'); // Replace with your Stripe publishable key
+                    stripe.redirectToCheckout({ sessionId: data.checkout_session_id })
+                        .then(function (result) {
+                            if (result.error) {
+                                alert(result.error.message);
+                            }
+                        });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
