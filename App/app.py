@@ -510,14 +510,9 @@ def subscribe():
         return redirect(url_for('login'))
 
     if request.method == 'POST':
-        user_email = session['username']  # Assuming 'username' holds the email
-
-        # Query the users table using the email index
-        response = users_table.query(
-            IndexName='email-index',
-            KeyConditionExpression=Key('email').eq(user_email)
-        )
-        user = response['Items'][0] if response['Items'] else None
+        user_id = session['user_id']
+        response = users_table.get_item(Key={'id': user_id})
+        user = response.get('Item')
 
         if not user:
             return jsonify({"error": "User not found"})
@@ -527,7 +522,7 @@ def subscribe():
                 payment_method_types=['card'],
                 customer_email=user['email'],
                 line_items=[{
-                    'price': 'price_1PV6omGthr7AaSvUYYsgRLyG',
+                    'price': 'price_1PQOO3Gthr7AaSvU3fHuPOGN',
                 }],
                 mode='subscription',
                 success_url=url_for('subscription_success', _external=True),
@@ -538,7 +533,6 @@ def subscribe():
             return jsonify(error=str(e)), 403
     else:
         return render_template('subscribe.html')
-
 
 @app.route('/subscription_success')
 def subscription_success():
