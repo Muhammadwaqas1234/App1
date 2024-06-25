@@ -326,15 +326,10 @@ def chat():
         return jsonify({"error": "User not logged in"})
 
     user_question = request.json["user_question"]
-    user_email = session['username']
+    user_id = session['user_id']
 
-    # Query the users table using the email index
-    response = users_table.query(
-        IndexName='email-index',
-        KeyConditionExpression=Key('email').eq(user_email)
-    )
-    user = response['Items'][0] if response['Items'] else None
-
+    response = users_table.get_item(Key={'id': user_id})
+    user = response.get('Item')
     if user:
         last_question_date = datetime.fromisoformat(user.get('last_question_date', '1970-01-01')).date()
         current_date = datetime.utcnow().date()
@@ -362,7 +357,7 @@ def chat():
 
         chat_history_table.put_item(
             Item={
-                "user_id": user['id'],  # Use user['id'] since we now have the full user item
+                "user_id": user_id,
                 "timestamp": datetime.utcnow().isoformat(),
                 "user_question": user_question,
                 "chatbot_response": response_text
