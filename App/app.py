@@ -16,8 +16,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 import fitz
 import stripe
 import base64
-import asyncio
-import shelve
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY")
@@ -120,10 +118,6 @@ def appendMessage(role, message, type='message'):
 
 
 pdf_dir="./data"
-cache_dir = "./cache"
-
-# Ensure the cache directory exists
-os.makedirs(cache_dir, exist_ok=True)
 
 def load_data():
     reader = SimpleDirectoryReader(pdf_dir, recursive=True)
@@ -138,8 +132,8 @@ def load_data():
     index = VectorStoreIndex.from_documents(docs, service_context=service_content)
     return index
 
-async def query_chatbot(query_engine, user_question):
-    response = await query_engine.query(user_question)
+def query_chatbot(query_engine, user_question):
+    response = query_engine.query(user_question)
     return response.response if response else None
 
 def initialize_chatbot(pdf_dir, model="gpt-3.5-turbo", temperature=0.4):
@@ -194,11 +188,11 @@ def initialize_chatbot(pdf_dir, model="gpt-3.5-turbo", temperature=0.4):
 
     return query_engine
 
-async def generate_response(user_question):
+def generate_response(user_question):
     index = load_data()
     chat_engine = index.as_chat_engine(chat_mode="condense_question", verbose=True)
 
-    response = await chat_engine.chat(user_question)
+    response = chat_engine.chat(user_question)
     if response:
         response_text = response.response
 
@@ -208,36 +202,27 @@ async def generate_response(user_question):
         with open('output.wav', 'rb') as audio_file:
             audio_data = base64.b64encode(audio_file.read()).decode('utf-8')
 
-        additional_questions = await generate_additional_questions(response_text)
-        document_section = extract_document_section(response_text, pdf_dir)
+        additional_questions = generate_additional_questions(response_text)
+        document_session = extract_document_section(response_text)
 
-        return response_text, additional_questions, audio_data, document_section
+        return response_text, additional_questions, audio_data, document_session
 
     return None, None, None, None
 
-async def generate_additional_questions(user_question):
+def generate_additional_questions(user_question):
     additional_questions = []
     words = ["apple", "mango", "orange"]
     for word in words:
-        question = await query_chatbot(initialize_chatbot(), user_question)
+        question = query_chatbot(initialize_chatbot(), user_question)
         additional_questions.append(question if question else None)
 
     return additional_questions
 
 def extract_text_from_pdf_page(pdf_path, page_num):
-    # Check if the page is already cached
-    cache_key = f"{os.path.basename(pdf_path)}_{page_num}"
-    with shelve.open(os.path.join(cache_dir, 'pdf_cache')) as cache:
-        if cache_key in cache:
-            return cache[cache_key]
-
-        doc = fitz.open(pdf_path)
-        page = doc.load_page(page_num)
-        text = page.get_text("text")
-
-        # Cache the extracted text
-        cache[cache_key] = text
-        return text
+    doc = fitz.open(pdf_path)
+    page = doc.load_page(page_num)
+    text = page.get_text("text")
+    return text
 
 def extract_document_section(response_text, pdf_dir):
     # Load all PDFs from the directory
@@ -340,7 +325,7 @@ def login():
 
 
 @app.route("/chat", methods=["POST"])
-async def chat():
+def chat():
     if 'username' not in session:
         return jsonify({"error": "User not logged in"})
 
@@ -365,7 +350,7 @@ async def chat():
         user['last_question_date'] = current_date.isoformat()
         users_table.put_item(Item=user)
 
-        response_text, additional_questions, audio_data, document_section = await generate_response(user_question)
+        response_text, additional_questions, audio_data, document_session = generate_response(user_question)
         appendMessage('user', user_question)
         appendMessage('assistant', response_text, type='response')
 
@@ -383,7 +368,7 @@ async def chat():
             }
         )
 
-        return jsonify({"response_text": response_text, "additional_questions": additional_questions, "audio_data": audio_data, "document_section": document_section})
+        return jsonify({"response_text": response_text, "additional_questions": additional_questions, "audio_data": audio_data, "document_session": document_session})
 
     return jsonify({"error": "User not found"})
 
@@ -491,37 +476,83 @@ def logout():
     session.pop('user_id', None)
     return redirect(url_for('login'))
 
-def handle_checkout_session(session):
-    customer_email = session['customer_details']['email']
-    response = users_table.scan(FilterExpression=Attr('email').eq(customer_email))
-    users = response['Items']
+@app.route("/payment")
+def payment():
+    return render_template("subscribe.html", stripe_public_key=os.getenv("STRIPE_PUBLIC_KEY"))
 
-    if users:
-        user = users[0]
-        user['user_type'] = 'pro'
-        users_table.put_item(Item=user)
 
-@app.route('/webhook', methods=['POST'])
-def stripe_webhook():
+@app.route("/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    try:
+        stripe_price_id = os.getenv("STRIPE_PRICE_ID")
+        if not stripe_price_id:
+            raise ValueError("Missing STRIPE_PRICE_ID environment variable")
+
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price": stripe_price_id,
+                "quantity": 1,
+            }],
+            mode="subscription",
+            success_url=url_for("subscription_success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=url_for("subscription_cancel", _external=True),
+        )
+        return jsonify({'checkout_session_id': checkout_session['id']})
+    except stripe.error.StripeError as e:
+        # Handle Stripe-specific errors
+        app.logger.error(f"Stripe error: {e.user_message}")
+        return jsonify(error="An error occurred with the payment gateway. Please try again."), 403
+    except ValueError as e:
+        # Handle missing environment variable errors
+        app.logger.error(f"ValueError: {e}")
+        return jsonify(error=str(e)), 400
+    except Exception as e:
+        # Handle generic errors
+        app.logger.error(f"Unexpected error: {str(e)}")
+        return jsonify(error="An unexpected error occurred. Please try again."), 500
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
     payload = request.get_data(as_text=True)
-    sig_header = request.headers.get('Stripe-Signature')
-    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    sig_header = request.headers.get("Stripe-Signature")
 
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+        event = stripe.Webhook.construct_event(payload, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET"))
     except ValueError as e:
-        return jsonify(success=False), 400
+        return jsonify({"error": "Invalid payload"}), 400
     except stripe.error.SignatureVerificationError as e:
-        return jsonify(success=False), 400
+        return jsonify({"error": "Invalid signature"}), 400
 
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        handle_checkout_session(session)
+    handle_webhook_event(event)
 
-    return jsonify(success=True)
+    return jsonify({"status": "success"}), 200
 
+def handle_webhook_event(event):
+    if event["type"] == "invoice.payment_succeeded":
+        invoice = event["data"]["object"]
+        customer_id = invoice["customer"]
+        update_subscription_status(customer_id, "active")
+    elif event["type"] == "invoice.payment_failed":
+        invoice = event["data"]["object"]
+        customer_id = invoice["customer"]
+        update_subscription_status(customer_id, "inactive")
 
+def update_subscription_status(customer_id, status):
+    response = users_table.query(
+        IndexName='email-index',
+        KeyConditionExpression=Key('stripe_customer_id').eq(customer_id)
+    )
+    user = response.get('Items', [])
 
+    if user:
+        user_id = user[0]['id']
+        users_table.update_item(
+            Key={"id": user_id},
+            UpdateExpression="SET subscription_status = :status",
+            ExpressionAttributeValues={":status": status}
+        )
 
 @app.route('/subscribe', methods=['GET', 'POST'])
 def subscribe():
@@ -541,7 +572,8 @@ def subscribe():
                 payment_method_types=['card'],
                 customer_email=user['email'],
                 line_items=[{
-                    'price': 'price_1PQOO3Gthr7AaSvU3fHuPOGN',
+                    'price': os.getenv("STRIPE_PRICE_ID"),
+                    'quantity': 1,
                 }],
                 mode='subscription',
                 success_url=url_for('subscription_success', _external=True),
@@ -553,24 +585,6 @@ def subscribe():
     else:
         return render_template('subscribe.html')
 
-@app.route('/subscription_success')
-def subscription_success():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    user_id = session['user_id']
-    response = users_table.get_item(Key={'id': user_id})
-    user = response.get('Item')
-
-    if user:
-        user['user_type'] = 'pro'
-        users_table.put_item(Item=user)
-
-    return render_template('subscription_success.html')
-
-@app.route('/subscription_cancel')
-def subscription_cancel():
-    return render_template('subscription_cancel.html')
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
