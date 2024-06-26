@@ -1,3 +1,4 @@
+
 import os
 import uuid
 from datetime import datetime
@@ -15,6 +16,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 import fitz
 import stripe
 import base64
+import asyncio
+import shelve
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY")
@@ -115,8 +118,15 @@ messages = []
 def appendMessage(role, message, type='message'):
     messages.append({"role": role, "content": message, "type": type})
 
+
+pdf_dir="./data"
+cache_dir = "./cache"
+
+# Ensure the cache directory exists
+os.makedirs(cache_dir, exist_ok=True)
+
 def load_data():
-    reader = SimpleDirectoryReader(input_dir="./data", recursive=True)
+    reader = SimpleDirectoryReader(pdf_dir, recursive=True)
     docs = reader.load_data()
     
     llm = OpenAI(model="gpt-3.5-turbo", temperature="0.1", systemprompt="""Use the books in data file as source for the answer. Generate a valid 
@@ -128,12 +138,12 @@ def load_data():
     index = VectorStoreIndex.from_documents(docs, service_context=service_content)
     return index
 
-def query_chatbot(query_engine, user_question):
-    response = query_engine.query(user_question)
+async def query_chatbot(query_engine, user_question):
+    response = await query_engine.query(user_question)
     return response.response if response else None
 
-def initialize_chatbot(data_dir="./data", model="gpt-3.5-turbo", temperature=0.4):
-    documents = SimpleDirectoryReader(data_dir).load_data()
+def initialize_chatbot(pdf_dir, model="gpt-3.5-turbo", temperature=0.4):
+    documents = SimpleDirectoryReader(pdf_dir).load_data()
     llm = OpenAI(model=model, temperature=temperature)
 
     additional_questions_prompt_str = (
@@ -184,11 +194,11 @@ def initialize_chatbot(data_dir="./data", model="gpt-3.5-turbo", temperature=0.4
 
     return query_engine
 
-def generate_response(user_question):
+async def generate_response(user_question):
     index = load_data()
     chat_engine = index.as_chat_engine(chat_mode="condense_question", verbose=True)
 
-    response = chat_engine.chat(user_question)
+    response = await chat_engine.chat(user_question)
     if response:
         response_text = response.response
 
@@ -198,29 +208,38 @@ def generate_response(user_question):
         with open('output.wav', 'rb') as audio_file:
             audio_data = base64.b64encode(audio_file.read()).decode('utf-8')
 
-        additional_questions = generate_additional_questions(response_text)
-        document_session = extract_document_section(response_text)
+        additional_questions = await generate_additional_questions(response_text)
+        document_section = extract_document_section(response_text, pdf_dir)
 
-        return response_text, additional_questions, audio_data, document_session
+        return response_text, additional_questions, audio_data, document_section
 
     return None, None, None, None
 
-def generate_additional_questions(user_question):
+async def generate_additional_questions(user_question):
     additional_questions = []
     words = ["apple", "mango", "orange"]
     for word in words:
-        question = query_chatbot(initialize_chatbot(), user_question)
+        question = await query_chatbot(initialize_chatbot(), user_question)
         additional_questions.append(question if question else None)
 
     return additional_questions
 
 def extract_text_from_pdf_page(pdf_path, page_num):
-    doc = fitz.open(pdf_path)
-    page = doc.load_page(page_num)
-    text = page.get_text("text")
-    return text
+    # Check if the page is already cached
+    cache_key = f"{os.path.basename(pdf_path)}_{page_num}"
+    with shelve.open(os.path.join(cache_dir, 'pdf_cache')) as cache:
+        if cache_key in cache:
+            return cache[cache_key]
 
-def extract_document_section(response_text, pdf_dir="./data"):
+        doc = fitz.open(pdf_path)
+        page = doc.load_page(page_num)
+        text = page.get_text("text")
+
+        # Cache the extracted text
+        cache[cache_key] = text
+        return text
+
+def extract_document_section(response_text, pdf_dir):
     # Load all PDFs from the directory
     pdf_texts = {}
     for filename in os.listdir(pdf_dir):
@@ -321,7 +340,7 @@ def login():
 
 
 @app.route("/chat", methods=["POST"])
-def chat():
+async def chat():
     if 'username' not in session:
         return jsonify({"error": "User not logged in"})
 
@@ -346,7 +365,7 @@ def chat():
         user['last_question_date'] = current_date.isoformat()
         users_table.put_item(Item=user)
 
-        response_text, additional_questions, audio_data, document_session = generate_response(user_question)
+        response_text, additional_questions, audio_data, document_section = await generate_response(user_question)
         appendMessage('user', user_question)
         appendMessage('assistant', response_text, type='response')
 
@@ -364,7 +383,7 @@ def chat():
             }
         )
 
-        return jsonify({"response_text": response_text, "additional_questions": additional_questions, "audio_data": audio_data, "document_session": document_session})
+        return jsonify({"response_text": response_text, "additional_questions": additional_questions, "audio_data": audio_data, "document_section": document_section})
 
     return jsonify({"error": "User not found"})
 
