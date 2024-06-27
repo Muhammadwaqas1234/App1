@@ -312,7 +312,7 @@ def login():
 
         response = users_table.query(
             IndexName='email-index',
-            KeyConditionExpression=Key('email').eq(email) & Key('password').eq(password)
+            KeyConditionExpression=Key('email').eq(email)
         )
 
         if response['Items']:
