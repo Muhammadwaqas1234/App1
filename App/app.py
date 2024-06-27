@@ -476,82 +476,38 @@ def logout():
     session.pop('user_id', None)
     return redirect(url_for('login'))
 
-@app.route("/payment")
-def payment():
-    return render_template("subscribe.html", stripe_public_key=os.getenv("STRIPE_PUBLIC_KEY"))
-
-
-@app.route("/create-checkout-session", methods=["POST"])
-def create_checkout_session():
-    try:
-        stripe_price_id = os.getenv("STRIPE_PRICE_ID")
-        if not stripe_price_id:
-            raise ValueError("Missing STRIPE_PRICE_ID environment variable")
-
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{
-                "price": stripe_price_id,
-                "quantity": 1,
-            }],
-            mode="subscription",
-            success_url=url_for("subscription_success", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=url_for("subscription_cancel", _external=True),
-        )
-        return jsonify({'checkout_session_id': checkout_session['id']})
-    except stripe.error.StripeError as e:
-        # Handle Stripe-specific errors
-        app.logger.error(f"Stripe error: {e.user_message}")
-        return jsonify(error="An error occurred with the payment gateway. Please try again."), 403
-    except ValueError as e:
-        # Handle missing environment variable errors
-        app.logger.error(f"ValueError: {e}")
-        return jsonify(error=str(e)), 400
-    except Exception as e:
-        # Handle generic errors
-        app.logger.error(f"Unexpected error: {str(e)}")
-        return jsonify(error="An unexpected error occurred. Please try again."), 500
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
+@app.route('/webhook', methods=['POST'])
+def stripe_webhook():
     payload = request.get_data(as_text=True)
-    sig_header = request.headers.get("Stripe-Signature")
+    sig_header = request.headers.get('Stripe-Signature')
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET"))
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
     except ValueError as e:
-        return jsonify({"error": "Invalid payload"}), 400
+        return jsonify(success=False), 400
     except stripe.error.SignatureVerificationError as e:
-        return jsonify({"error": "Invalid signature"}), 400
+        return jsonify(success=False), 400
 
-    handle_webhook_event(event)
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        handle_checkout_session(session)
 
-    return jsonify({"status": "success"}), 200
+    return jsonify(success=True)
 
-def handle_webhook_event(event):
-    if event["type"] == "invoice.payment_succeeded":
-        invoice = event["data"]["object"]
-        customer_id = invoice["customer"]
-        update_subscription_status(customer_id, "active")
-    elif event["type"] == "invoice.payment_failed":
-        invoice = event["data"]["object"]
-        customer_id = invoice["customer"]
-        update_subscription_status(customer_id, "inactive")
-
-def update_subscription_status(customer_id, status):
-    response = users_table.query(
-        IndexName='email-index',
-        KeyConditionExpression=Key('stripe_customer_id').eq(customer_id)
+def handle_checkout_session(session):
+    customer_email = session['customer_details']['email']
+    response = users_table.scan(
+        FilterExpression=Attr('email').eq(customer_email)
     )
-    user = response.get('Items', [])
+    users = response['Items']
 
-    if user:
-        user_id = user[0]['id']
+    if users:
+        user = users[0]
         users_table.update_item(
-            Key={"id": user_id},
-            UpdateExpression="SET subscription_status = :status",
-            ExpressionAttributeValues={":status": status}
+            Key={'id': user['id']},
+            UpdateExpression='SET user_type = :val1',
+            ExpressionAttributeValues={':val1': 'pro'}
         )
 
 @app.route('/subscribe', methods=['GET', 'POST'])
@@ -572,8 +528,7 @@ def subscribe():
                 payment_method_types=['card'],
                 customer_email=user['email'],
                 line_items=[{
-                    'price': os.getenv("STRIPE_PRICE_ID"),
-                    'quantity': 1,
+                    'price': 'price_1PQOO3Gthr7AaSvU3fHuPOGN',
                 }],
                 mode='subscription',
                 success_url=url_for('subscription_success', _external=True),
@@ -584,6 +539,29 @@ def subscribe():
             return jsonify(error=str(e)), 403
     else:
         return render_template('subscribe.html')
+
+@app.route('/subscription_success')
+def subscription_success():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    user_id = session['user_id']
+    response = users_table.get_item(Key={'id': user_id})
+    user = response.get('Item')
+
+    if user:
+        users_table.update_item(
+            Key={'id': user['id']},
+            UpdateExpression='SET user_type = :val1',
+            ExpressionAttributeValues={':val1': 'pro'}
+        )
+
+    return render_template('subscription_success.html')
+
+@app.route('/subscription_cancel')
+def subscription_cancel():
+    return render_template('subscription_cancel.html')
+
 
 
 @app.route("/feedback", methods=["POST"])
