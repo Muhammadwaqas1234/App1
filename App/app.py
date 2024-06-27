@@ -1,4 +1,3 @@
-
 import os
 import uuid
 from datetime import datetime
@@ -14,13 +13,11 @@ from llama_index.core import SimpleDirectoryReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import fitz
-import stripe
 import base64
-
+import stripe
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY")
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-app.config['STRIPE_PUBLIC_KEY'] = os.getenv("STRIPE_PUBLIC_KEY")
+
 
 # Initialize DynamoDB
 dynamodb = boto3.resource('dynamodb', region_name='ap-southeast-2')
@@ -136,7 +133,7 @@ def query_chatbot(query_engine, user_question):
     response = query_engine.query(user_question)
     return response.response if response else None
 
-def initialize_chatbot(pdf_dir, model="gpt-3.5-turbo", temperature=0.4):
+def initialize_chatbot(pdf_dir = "./data", model="gpt-3.5-turbo", temperature=0.4):
     documents = SimpleDirectoryReader(pdf_dir).load_data()
     llm = OpenAI(model=model, temperature=temperature)
 
@@ -211,7 +208,7 @@ def generate_response(user_question):
 
 def generate_additional_questions(user_question):
     additional_questions = []
-    words = ["apple", "mango", "orange"]
+    words = ["1", "2", "3"]
     for word in words:
         question = query_chatbot(initialize_chatbot(), user_question)
         additional_questions.append(question if question else None)
@@ -224,7 +221,7 @@ def extract_text_from_pdf_page(pdf_path, page_num):
     text = page.get_text("text")
     return text
 
-def extract_document_section(response_text, pdf_dir):
+def extract_document_section(response_text, pdf_dir = "./data"):
     # Load all PDFs from the directory
     pdf_texts = {}
     for filename in os.listdir(pdf_dir):
@@ -476,17 +473,44 @@ def logout():
     session.pop('user_id', None)
     return redirect(url_for('login'))
 
+def handle_checkout_session(session):
+    print("Handling checkout session...")
+    customer_email = session['customer_details']['email']
+    print(f"Customer email: {customer_email}")
+
+    response = users_table.scan(FilterExpression=Attr('email').eq(customer_email))
+    users = response['Items']
+
+    if users:
+        user = users[0]
+        print(f"Found user: {user}")
+
+        user['user_type'] = 'pro'
+        users_table.put_item(Item=user)
+        print(f"Updated user: {user}")
+    else:
+        print("User not found")
+
+    print("Checkout session handling complete.")
+
+
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
+    print("Webhook received")
     payload = request.get_data(as_text=True)
+    print("Payload:", payload)
+    
     sig_header = request.headers.get('Stripe-Signature')
     endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+        print("Event:", event)
     except ValueError as e:
+        print("ValueError:", e)
         return jsonify(success=False), 400
     except stripe.error.SignatureVerificationError as e:
+        print("SignatureVerificationError:", e)
         return jsonify(success=False), 400
 
     if event['type'] == 'checkout.session.completed':
@@ -495,21 +519,6 @@ def stripe_webhook():
 
     return jsonify(success=True)
 
-def handle_checkout_session(session):
-    customer_email = session['customer_details']['email']
-    response = users_table.scan(
-        FilterExpression=Attr('email').eq(customer_email)
-    )
-    users = response['Items']
-
-    if users:
-        user = users[0]
-        users_table.update_item(
-            Key={'id': user['id']},
-            UpdateExpression='SET user_type = :val1',
-            ExpressionAttributeValues={':val1': 'pro'}
-        )
-
 @app.route('/subscribe', methods=['GET', 'POST'])
 def subscribe():
     if 'username' not in session:
@@ -517,11 +526,14 @@ def subscribe():
 
     if request.method == 'POST':
         user_id = session['user_id']
+        print(f"User ID from session: {user_id}")
+
         response = users_table.get_item(Key={'id': user_id})
         user = response.get('Item')
-
         if not user:
             return jsonify({"error": "User not found"})
+
+        print(f"User found: {user}")
 
         try:
             checkout_session = stripe.checkout.Session.create(
@@ -534,11 +546,17 @@ def subscribe():
                 success_url=url_for('subscription_success', _external=True),
                 cancel_url=url_for('subscription_cancel', _external=True),
             )
+
+            print(f"Checkout session created: {checkout_session}")
+
             return jsonify({'checkout_session_id': checkout_session['id']})
         except Exception as e:
+            print(f"Error creating checkout session: {str(e)}")
             return jsonify(error=str(e)), 403
+
     else:
         return render_template('subscribe.html')
+
 
 @app.route('/subscription_success')
 def subscription_success():
@@ -550,11 +568,8 @@ def subscription_success():
     user = response.get('Item')
 
     if user:
-        users_table.update_item(
-            Key={'id': user['id']},
-            UpdateExpression='SET user_type = :val1',
-            ExpressionAttributeValues={':val1': 'pro'}
-        )
+        user['user_type'] = 'pro'
+        users_table.put_item(Item=user)
 
     return render_template('subscription_success.html')
 
